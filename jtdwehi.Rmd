@@ -1,0 +1,321 @@
+---
+title: "Twitter Coverage of the Joining the Dots symposium"
+author: "Luke Zappia"
+date: "`r Sys.time()`"
+output: 
+  html_document: 
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(rtweet)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(knitr)
+library(wordcloud)
+library(tidytext)
+library(igraph)
+
+theme_set(theme_light())
+
+jtdwehi <- readRDS("data/jtdwehi.Rds")
+```
+
+# Introduction
+An analysis of tweets from the Joining the Dots symposium. `r nrow(jtdwehi)`
+tweets were collected using the `rtweet` R package:
+
+```{r search-twitter, eval=FALSE, echo=TRUE}
+jtdwehi <- search_tweets("#jtdwehi", 10000)
+saveRDS(jtdwehi, "data/jtdwehi.Rds")
+```
+
+## Search all the hashtags!
+```{r hashtags}
+jtdwehi %>% 
+  filter(is_retweet == FALSE) %>% 
+  unnest_tokens(tags, hashtags) %>% 
+  filter(!is.na(tags)) %>% 
+  count(tags) %>% 
+  arrange(desc(n)) %>% 
+  slice(1:20) %>% 
+  ggplot(aes(reorder(tags, n), n)) + 
+    geom_col(fill = "skyblue3") + 
+    coord_flip() + 
+    labs(x = "hashtag", y = "count",
+         title = "Hashtags used during Joining the Dots", 
+         subtitle = "Top 20 hashtags in non-retweets")
+```
+
+# Timeline
+## Tweets by day
+```{r tweets-by-day}
+jtdwehi %>% 
+  mutate(date = as_date(created_at, tz = "Europe/Prague")) %>% 
+  count(date) %>% 
+  ggplot(aes(date, n)) + geom_col(fill = "skyblue3") +  
+    labs(x = "Date", y = "Tweets", title = "#jtdwehi tweets per day") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Tweets by day and time
+Filtered for dates July 21-26, Prague time.
+```{r tweets-by-day-hour}
+jtdwehi %>% 
+  mutate(datetime = as_datetime(created_at, tz = "Australia/ACT"),
+         hour = hour(datetime)) %>% 
+  group_by(date = as_date(datetime), hour) %>% 
+  summarise(count = n()) %>% 
+  filter(date >= as_date("2017-08-17"), date <= as_date("2017-08-19")) %>% 
+  ggplot(aes(hour, count)) +
+    geom_col(fill = "skyblue3") +
+    facet_grid(strftime(date, "%b %d") ~ .) + 
+    labs(x = "Hour", y = "Tweets", title = "#jtdwehi tweets by time of day") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+# Users
+## Top tweeters
+```{r tweets-top-users}
+jtdwehi %>% 
+  count(screen_name) %>% 
+  arrange(desc(n)) %>%
+  slice(1:20) %>% 
+  ggplot(aes(reorder(screen_name, n), n)) +
+    geom_col(fill = "skyblue3") +
+    coord_flip() + 
+    labs(x = "Screen Name", y = "Tweets",
+         title = "#jtdwehi tweets by user",
+         subtitle = "top 20 users") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Sources
+```{r tweets-top-sources}
+jtdwehi %>% 
+  distinct(screen_name, source) %>%
+  count(source) %>% 
+  filter(n >= 5) %>% 
+  ggplot(aes(reorder(source, n), n)) +
+    geom_col(fill = "skyblue3") +
+    coord_flip() + 
+    labs(x = "Source", y = "Tweets",
+         title = "#jtdwehi tweets by source",
+         subtitle = "distinct(screen_name, source) with >= 5 tweets") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+# Networks
+## Replies
+The "replies network", composed from users who reply directly to one another, 
+coloured by page rank.
+
+Better to view the original PNG file in the `data` directory.
+
+```{r reply-network, eval=FALSE}
+jtdwehi_replies <- jtdwehi %>% 
+  filter(!is.na(in_reply_to_status_screen_name)) %>% 
+  select(screen_name, in_reply_to_status_screen_name) %>% 
+  graph.data.frame(directed = TRUE)
+
+V(jtdwehi_replies)$label <- V(jtdwehi_replies)$name
+V(jtdwehi_replies)$id    <- V(jtdwehi_replies)$name
+
+write_graph(jtdwehi_replies, file = "data/jtdwehi_replies.graphml",
+            format = "graphml")
+```
+
+![](data/jtdwehi_replies.png)
+
+## Mentions
+The "mentions network", where users mention other users in their tweets.
+Filtered for k-core >= 4 and coloured by modularity class.
+
+Better to view the original PNG file in the `data` directory.
+
+```{r mentions-network, eval=FALSE}
+jtdwehi_mentions <- jtdwehi %>% 
+  filter(!is.na(mentions_screen_name)) %>% 
+  select(screen_name, mentions_screen_name) %>% 
+  mutate(mentions_screen_name = strsplit(mentions_screen_name, " ")) %>% 
+  unnest(mentions_screen_name) %>% 
+  graph.data.frame()
+
+V(jtdwehi_mentions)$label <- V(jtdwehi_mentions)$name
+V(jtdwehi_mentions)$id    <- V(jtdwehi_mentions)$name
+
+write_graph(jtdwehi_mentions, file = "data/jtdwehi_mentions.graphml",
+            format = "graphml")
+```
+
+![](data/jtdwehi_mentions.png)
+
+# Retweets
+## Retweet proportion
+```{r is-retweet}
+jtdwehi %>% 
+  count(is_retweet) %>% 
+  ggplot(aes(is_retweet, n)) + geom_col(fill = "skyblue3") + 
+    labs(x = "Is retweet", y = "Tweets",
+         title = "#jtdwehi tweets by retweet status") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Retweet count
+```{r retweet-count}
+jtdwehi %>% 
+  ggplot(aes(retweet_count)) +
+    geom_histogram(bins = max(jtdwehi$retweet_count), fill = "skyblue3") +
+    labs(x = "Retweet count", y = "Tweets",
+         title = "#jtdwehi distribution of retweets per tweet") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Top retweets
+```{r most-retweeted}
+jtdwehi %>% 
+  filter(is.na(retweet_status_id)) %>% 
+  select(screen_name, text, retweet_count) %>% 
+  arrange(desc(retweet_count)) %>% 
+  distinct() %>%
+  slice(1:10) %>% 
+  kable(format = "html")
+```
+
+# Favourites
+## Favourite proportion
+```{r has-favorite}
+jtdwehi %>% 
+  mutate(has_favorite = ifelse(favorite_count > 0, TRUE, FALSE)) %>% 
+  count(has_favorite) %>%
+  ggplot(aes(has_favorite, n)) + geom_col(fill = "skyblue3") + 
+    labs(x = "Has favorite", y = "Tweets",
+         title = "#jtdwehi tweets by favorited status") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Favourite count
+```{r favorite-count}
+jtdwehi %>% 
+  ggplot(aes(favorite_count)) +
+    geom_histogram(bins = max(jtdwehi$favorite_count), fill = "skyblue3") +
+    labs(x = "Favorite count", y = "Tweets",
+         title = "#jtdwehi distribution of favorites per tweet") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Top favourites
+```{r most-favorited}
+jtdwehi %>% 
+  select(screen_name, text, favorite_count) %>% 
+  arrange(desc(favorite_count)) %>% 
+  distinct() %>%
+  slice(1:10) %>% 
+  kable(format = "html")
+```
+
+# Quotes
+## Quote proportion
+```{r is-quote}
+jtdwehi %>% 
+  count(is_quote_status) %>% 
+  ggplot(aes(is_quote_status, n)) +
+    geom_col(fill = "skyblue3") + 
+    labs(x = "Is quote", y = "Tweets",
+         title = "#jtdwehi tweets by quote status") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Quote count
+```{r quotes-count}
+jtdwehi %>% 
+  filter(!is.na(quote_status_id)) %>% 
+  count(quote_status_id) %>% 
+  ggplot(aes(n)) + geom_histogram(bins = 10, fill = "skyblue3") +
+    labs(x = "Quote count", y = "Tweets",
+         title = "#jtdwehi distribution of quotes per tweet") + 
+    scale_x_continuous(limits = c(0, 10), breaks = seq(0, 10, 2)) + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Top quotes
+```{r most-quoted}
+jtdwehi %>% 
+  filter(!is.na(quote_status_id)) %>% 
+  count(quote_status_id) %>% 
+  filter(n > 1) %>% 
+  arrange(desc(n)) %>% 
+#  slice(1:10) %>% 
+  inner_join(select(jtdwehi, screen_name, quote_status_id,
+                    is_retweet, text)) %>% 
+  filter(is_retweet == FALSE) %>% 
+  select(screen_name, text, quote_count = n) %>%
+  distinct() %>%
+  slice(1:10) %>%
+  kable(format = "html")
+```
+
+# Media
+## Media count
+```{r has-media}
+jtdwehi %>% 
+  mutate(has_media = !is.na(media_id)) %>% 
+  count(has_media) %>% 
+  ggplot(aes(has_media, n)) +
+    geom_col(fill = "skyblue3") + 
+    labs(x = "Has media", y = "Tweets",
+         title = "#jtdwehi tweets by media status") + 
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 12))
+```
+
+## Top media
+```{r liked-media}
+jtdwehi_media <- jtdwehi %>% 
+  filter(!is.na(media_id)) %>% 
+  arrange(desc(favorite_count)) %>%
+  filter(favorite_count > 0)
+
+jtdwehi_media %>%
+  slice(1:10) %>% 
+  select(screen_name, text, favorite_count) %>%
+  kable(format = "html")
+```
+
+### Most liked media image
+![](`r jtdwehi_media[1, "media_url"]`)
+
+# Tweet text
+The 100 words used 3 or more times. Hashtags for satellite meetings removed.
+
+```{r count-words}
+data("stop_words")
+
+jtdwehi %>% 
+  filter(is_retweet == FALSE) %>% 
+  unnest_tokens(word, text) %>% 
+  select(word) %>% 
+  filter(!word %in% c("jtdwehi", "https", "t.co", "amp"),
+         !word %in% tolower(jtdwehi$screen_name), 
+         !grepl("^\\d+$", word)) %>% 
+  anti_join(stop_words) %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words = 100, min.freq = 3,
+                 colors = brewer.pal(6, "Spectral")))
+```
